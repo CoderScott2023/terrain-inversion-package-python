@@ -110,6 +110,101 @@ def invert(reflectance, azimuth, altitude=None, zenith=None, cellsize=1.0,
     return (dem, res) if return_result else dem
 
 
+def invert_multilook(reflectances, azimuths, altitudes=None, zeniths=None, cellsizes=1.0,
+                     view_azimuths=0.0, view_altitudes=90.0, albedo=1.0,
+                     model='lunar_lambert', rad=False, valid=None, alpha=1e-7,
+                     maxiter=10000, eps=1e-6, z0=None, ftol=1e-12, gtol=1e-10,
+                     scale=None, return_result=False, warn_unconverged=True):
+
+    objectives = []
+
+    for i, each_reflectance in enumerate(reflectances):
+
+        each_reflectance = to_reflectance(each_reflectance, scale)
+
+        if valid is None:
+            each_valid = estimate_valid(each_reflectance)
+        else:
+            each_valid = valid[i]
+
+        each_s_vec, each_v_vec, each_phase, model_fn = prepare_geometry(
+            azimuths[i],
+            altitudes[i] if altitudes is not None else None,
+            zeniths[i] if zeniths is not None else None,
+            view_azimuths[i] if view_azimuths is not None else None,
+            view_altitudes[i] if view_altitudes is not None else None,
+            model,
+            rad
+        )
+
+        each_cellsize = cellsizes[i] if np.ndim(cellsizes) > 0 else cellsizes
+
+        objectives.append(
+            make_objective(
+                each_reflectance,
+                each_valid,
+                each_s_vec,
+                each_v_vec,
+                each_phase,
+                model_fn,
+                each_cellsize,
+                albedo,
+                alpha,
+                eps
+            )
+        )
+
+    def objective_function(z_flat):
+        total_loss = 0.0
+        total_grad = np.zeros_like(z_flat)
+
+        for objective in objectives:
+            loss, grad = objective(z_flat)
+            total_loss += loss
+            total_grad += grad
+
+        return total_loss, total_grad
+
+    rows, cols = reflectances[0].shape
+
+    x0 = (
+        np.zeros(rows * cols, dtype=np.float64)
+        if z0 is None
+        else np.asarray(z0, dtype=np.float64).ravel()
+    )
+
+    res = minimize(
+        objective_function,
+        x0,
+        method='L-BFGS-B',
+        jac=True,
+        options={
+            'maxiter': maxiter,
+            'ftol': ftol,
+            'gtol': gtol
+        }
+    )
+
+    if warn_unconverged and not res.success:
+        warnings.warn(
+            f"optimiser did not converge after {res.nit} iterations: "
+            f"{res.message}",
+            RuntimeWarning,
+            stacklevel=2
+        )
+
+    final_dem = res.x.reshape((rows, cols))
+    dem = final_dem - final_dem.mean()
+
+    return (dem, res) if return_result else dem
+
+
+        
+
+
+    
+
+
 def invert_file(reflectance_tif, output_tif, azimuth, cellsize=None, scale=None, **kwargs):
     from ..core.io import read_raster_with_grid, write_array
 
