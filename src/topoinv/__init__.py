@@ -7,6 +7,6 @@ from .geometry.grid import gradient_adjoint, horn_adjoint, horn_gradients, surfa
 from .photometry.brdf import (MODELS, lambert, lommel_seeliger, lunar_lambert, mcewen_L,
                               resolve_model)
 from .sfs.forward import prepare_geometry, render
-from .sfs.inverse import invert, make_objective, to_reflectance
+from .sfs.inverse import invert, invert_multilook, make_objective, to_reflectance
 
 __version__ = '0.1.0'

@@ -110,11 +110,39 @@ def invert(reflectance, azimuth, altitude=None, zenith=None, cellsize=1.0,
     return (dem, res) if return_result else dem
 
 
+def _per_view(value, index):
+    if value is None:
+        return None
+    return value[index] if np.ndim(value) > 0 else value
+
+
+def _check_views(reflectances, named_values):
+    n_views = len(reflectances)
+    if n_views == 0:
+        raise ValueError("invert_multilook needs at least one image")
+
+    shapes = {np.shape(r) for r in reflectances}
+    if len(shapes) != 1:
+        raise ValueError(f"all images must share a shape, got {sorted(shapes)}")
+
+    for name, value in named_values:
+        if value is not None and np.ndim(value) > 0 and len(value) != n_views:
+            raise ValueError(f"{name} has {len(value)} entries but there are "
+                             f"{n_views} images")
+    return n_views
+
+
 def invert_multilook(reflectances, azimuths, altitudes=None, zeniths=None, cellsizes=1.0,
                      view_azimuths=0.0, view_altitudes=90.0, albedo=1.0,
                      model='lunar_lambert', rad=False, valid=None, alpha=1e-7,
                      maxiter=10000, eps=1e-6, z0=None, ftol=1e-12, gtol=1e-10,
                      scale=None, return_result=False, warn_unconverged=True):
+
+    _check_views(reflectances, (('azimuths', azimuths), ('altitudes', altitudes),
+                                ('zeniths', zeniths), ('cellsizes', cellsizes),
+                                ('view_azimuths', view_azimuths),
+                                ('view_altitudes', view_altitudes),
+                                ('valid', valid)))
 
     objectives = []
 
@@ -128,16 +156,16 @@ def invert_multilook(reflectances, azimuths, altitudes=None, zeniths=None, cells
             each_valid = valid[i]
 
         each_s_vec, each_v_vec, each_phase, model_fn = prepare_geometry(
-            azimuths[i],
-            altitudes[i] if altitudes is not None else None,
-            zeniths[i] if zeniths is not None else None,
-            view_azimuths[i] if view_azimuths is not None else None,
-            view_altitudes[i] if view_altitudes is not None else None,
+            _per_view(azimuths, i),
+            _per_view(altitudes, i),
+            _per_view(zeniths, i),
+            _per_view(view_azimuths, i),
+            _per_view(view_altitudes, i),
             model,
             rad
         )
 
-        each_cellsize = cellsizes[i] if np.ndim(cellsizes) > 0 else cellsizes
+        each_cellsize = _per_view(cellsizes, i)
 
         objectives.append(
             make_objective(
