@@ -287,8 +287,35 @@ def reconstruct(images, K, distortion=None, poses=None, detector='sift',
     return cloud_points, result
 
 
-def georeference(points, camera_positions=None, control_points=None,
+def georeference(points, R, t, camera_positions=None, control_points=None,
                  similarity=None, crs=None):
+
+    points = np.asarray(points, dtype=np.float64)
+
+    if points.ndim != 2 or points.shape[1] != 3:
+        raise ValueError("points must have shape (N, 3)")
+
+    if camera_positions is None and control_points is None:
+        raise ValueError(
+            "Provide camera_positions or control_points to georeference."
+        )
+
+    if camera_positions is not None:
+        camera_positions = np.asarray(camera_positions, dtype=np.float64)
+
+        if camera_positions.ndim != 2 or camera_positions.shape[1] != 3:
+            raise ValueError(
+                "camera_positions must have shape (N, 3)"
+            )
+
+    if control_points is not None:
+        control_points = np.asarray(control_points, dtype=np.float64)
+
+        if control_points.ndim != 2 or control_points.shape[1] != 3:
+            raise ValueError(
+                "control_points must have shape (N, 3)"
+            )
+
     raise NotImplementedError
 
 
