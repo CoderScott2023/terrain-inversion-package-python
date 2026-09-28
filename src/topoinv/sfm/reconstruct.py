@@ -1,6 +1,8 @@
 import numpy as np
 import cv2
 
+from ..core.align import similarity_fit
+
 
 def camera_matrix(focal_length, principal_point=None, image_shape=None, pixel_size=1.0):
     fx = fy = float(focal_length) / float(pixel_size)
@@ -287,51 +289,137 @@ def reconstruct(images, K, distortion=None, poses=None, detector='sift',
     return cloud_points, result
 
 
-def georeference(points, R, t, camera_positions=None, control_points=None,
-                 similarity=None, crs=None):
+def camera_centres(poses, indices=None):
+    keys = sorted(poses) if isinstance(poses, dict) else list(range(len(poses)))
+    if indices is not None:
+        wanted = set(indices)
+        keys = [k for k in keys if k in wanted]
+    centres = [-np.asarray(poses[k][0], np.float64).T
+               @ np.asarray(poses[k][1], np.float64).reshape(3) for k in keys]
+    return np.asarray(centres, dtype=np.float64), keys
 
+
+def georeference(points, R, control_points, world_points, with_scale=True,
+                 robust=False, return_alignment=False, crs=None, **kwargs):
     points = np.asarray(points, dtype=np.float64)
 
     if points.ndim != 2 or points.shape[1] != 3:
-        raise ValueError("points must have shape (N, 3)")
+        raise ValueError("points must have shape (N, 3), got " + str(points.shape))
 
-    if camera_positions is None and control_points is None:
-        raise ValueError(
-            "Provide camera_positions or control_points to georeference."
-        )
+    if control_points is None or world_points is None:
+        raise ValueError("georeference needs control_points in the reconstruction "
+                         "frame and matching world_points")
 
-    if camera_positions is not None:
-        camera_positions = np.asarray(camera_positions, dtype=np.float64)
+    alignment = similarity_fit(control_points, world_points, rotation=R,
+                               with_scale=with_scale, robust=robust, **kwargs)
 
-        if camera_positions.ndim != 2 or camera_positions.shape[1] != 3:
-            raise ValueError(
-                "camera_positions must have shape (N, 3)"
-            )
+    moved = alignment.apply(points)
+    return (moved, alignment) if return_alignment else moved
 
-    if control_points is not None:
-        control_points = np.asarray(control_points, dtype=np.float64)
 
-        if control_points.ndim != 2 or control_points.shape[1] != 3:
-            raise ValueError(
-                "control_points must have shape (N, 3)"
-            )
+AGGREGATORS = ('median', 'mean', 'min', 'max', 'count', 'std')
 
-    raise NotImplementedError
+
+def grid_transform(bounds, cellsize):
+    xmin, ymin, xmax, ymax = bounds
+    try:
+        from affine import Affine
+        return Affine(cellsize, 0.0, xmin, 0.0, -cellsize, ymax)
+    except ImportError:
+        return (cellsize, 0.0, xmin, 0.0, -cellsize, ymax)
 
 
 def points_to_dem(points, cellsize, bounds=None, aggregate='median',
                   min_points=1, fill_holes=False, crs=None):
-    raise NotImplementedError
+    points = np.asarray(points, dtype=np.float64)
+    if points.ndim != 2 or points.shape[1] != 3:
+        raise ValueError("points must have shape (N, 3), got " + str(points.shape))
+    if aggregate not in AGGREGATORS:
+        raise ValueError("aggregate must be one of " + str(AGGREGATORS)
+                         + ", got " + repr(aggregate))
+    if not np.isfinite(cellsize) or cellsize <= 0:
+        raise ValueError("cellsize must be positive, got " + str(cellsize))
+
+    points = points[np.all(np.isfinite(points), axis=1)]
+    if len(points) == 0:
+        raise ValueError("no finite points to grid")
+
+    x, y, z = points[:, 0], points[:, 1], points[:, 2]
+    if bounds is None:
+        bounds = (x.min(), y.min(), x.max(), y.max())
+    xmin, ymin, xmax, ymax = (float(v) for v in bounds)
+    if xmax <= xmin or ymax <= ymin:
+        raise ValueError("bounds must satisfy xmax > xmin and ymax > ymin, got "
+                         + str(bounds))
+
+    cols = max(int(np.ceil((xmax - xmin) / cellsize)), 1)
+    rows = max(int(np.ceil((ymax - ymin) / cellsize)), 1)
+
+    col = np.floor((x - xmin) / cellsize).astype(np.int64)
+    row = np.floor((ymax - y) / cellsize).astype(np.int64)
+    inside = (col >= 0) & (col < cols) & (row >= 0) & (row < rows)
+    if not inside.any():
+        raise ValueError("no points fall inside bounds " + str(bounds))
+    col, row, z = col[inside], row[inside], z[inside]
+
+    flat = row * cols + col
+    order = np.lexsort((z, flat))
+    flat, z = flat[order], z[order]
+    cells, starts, counts = np.unique(flat, return_index=True, return_counts=True)
+
+    if aggregate == 'count':
+        values = counts.astype(np.float64)
+    elif aggregate == 'min':
+        values = z[starts]
+    elif aggregate == 'max':
+        values = z[starts + counts - 1]
+    elif aggregate == 'mean':
+        values = np.add.reduceat(z, starts) / counts
+    elif aggregate == 'std':
+        means = np.add.reduceat(z, starts) / counts
+        squares = np.add.reduceat(z * z, starts) / counts
+        values = np.sqrt(np.maximum(squares - means * means, 0.0))
+    else:
+        low = starts + (counts - 1) // 2
+        high = starts + counts // 2
+        values = 0.5 * (z[low] + z[high])
+
+    dem = np.full(rows * cols, np.nan, dtype=np.float64)
+    keep = counts >= max(int(min_points), 1)
+    dem[cells[keep]] = values[keep]
+    dem = dem.reshape(rows, cols)
+
+    if fill_holes:
+        empty = np.isnan(dem)
+        if empty.any() and not empty.all():
+            from scipy.ndimage import distance_transform_edt
+            indices = distance_transform_edt(empty, return_distances=False,
+                                             return_indices=True)
+            filled = dem[tuple(indices)]
+            if fill_holes is not True:
+                distances = distance_transform_edt(empty)
+                filled = np.where(distances <= float(fill_holes), filled, np.nan)
+            dem = np.where(empty, filled, dem)
+
+    return dem, grid_transform((xmin, ymin, xmax, ymax), cellsize)
 
 
-def sfm_to_dem(images, K, cellsize, distortion=None, poses=None,
-               camera_positions=None, control_points=None, crs=None,
-               bounds=None, aggregate='median', fill_holes=False,
+def sfm_to_dem(images, K, cellsize, distortion=None, poses=None, rotation=None,
+               camera_positions=None, control_points=None, world_points=None, crs=None,
+               bounds=None, aggregate='median', fill_holes=False, min_points=1,
                return_result=False, **reconstruct_kwargs):
     points, result = reconstruct(images, K, distortion=distortion, poses=poses,
                                  return_result=True, **reconstruct_kwargs)
-    points = georeference(points, camera_positions=camera_positions,
-                          control_points=control_points, crs=crs)
-    dem = points_to_dem(points, cellsize, bounds=bounds, aggregate=aggregate,
-                        fill_holes=fill_holes, crs=crs)
-    return (dem, points, result) if return_result else dem
+
+    if control_points is None and camera_positions is not None:
+        control_points, keys = camera_centres(result['poses'])
+        world_points = np.asarray(camera_positions, dtype=np.float64)
+        if len(world_points) > max(keys):
+            world_points = world_points[keys]
+
+    points = georeference(points, rotation, control_points, world_points, crs=crs)
+
+    dem, transform = points_to_dem(points, cellsize, bounds=bounds, aggregate=aggregate,
+                                   min_points=min_points, fill_holes=fill_holes, crs=crs)
+
+    return (dem, transform, points, result) if return_result else (dem, transform)

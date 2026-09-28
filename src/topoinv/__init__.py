@@ -1,3 +1,4 @@
+from .core.align import Alignment, coregister, similarity_fit
 from .core.masks import LIT, NODATA, SELF_SHADOWED, estimate_valid, saturated
 from .core.metrics import (correlation, dem_error, slope_correlation, slope_degrees,
                            slope_error, summary)
